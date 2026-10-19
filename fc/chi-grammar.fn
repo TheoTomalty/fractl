@@ -1,0 +1,129 @@
+import utils
+import grammar
+import chi-symbols
+import mu
+import wam
+
+rule expr-ident        : i=ident → #i
+rule expr-ident        : “«” [^»]* “»” @s → intern(subseq(s, 1, length(s) - 1))
+rule expr-number       : n=number → #n
+rule expr-string       : s=string → #s
+rule expr-char         : c=char → #c
+rule expr-paren        : #(? e=exprs) → #(case (length e) (0 nil) (1 (first e)) (t `(values ,@e)))
+rule expr-list         : #[? e=exprs] → #(when e `(list ,@e))
+rule exprs             : e=@expr/#, (. “,”)? → #e
+rule kwarg             : i=expr-ident . “:” .. e=expr → #(list (intern (string-upcase (symbol-name i)) (find-package "KEYWORD")) e)
+rule arguments         : #(? e=exprs) → e
+rule expr-call         : i=expr-ident a=arguments → #`(,i ,@a)
+
+rule type-ident        : &[^A-Z] i=expr-ident → i
+rule type-var          : &[^a-z] i=expr-ident → make-var(name: i)
+rule type-call         : i=type-ident #(? a=@type/#, (. “,”)?) → #`(,i ,@a)
+
+rule expr-0
+    : e=expr-ident | e=expr-number | e=expr-paren
+    | e=expr-string | e=expr-call | e=expr-list | e=expr-char
+    → e
+rule type-0
+    : y=type-ident | y=type-var | y=type-call
+    → y
+    
+rule expr-index        : o=expr-1 “_” e=expr-0 → #`(index ,o ,e)
+rule expr-field        : e=expr-1 “.” f=expr-ident|f=expr-number → #`(field ,e ,f)
+
+rule expr-1
+    : e=expr-0 | e=expr-index | e=expr-field
+    → #e
+
+rule expr-not          : “¬” . e=expr-2 → #`(not ,e)
+rule expr-addr         : “&” . e=expr-2 → #`(addr ,e)
+rule expr-deref        : “*” . e=expr-2 → #`(deref ,e)
+
+rule type-ptr          : “*” . y=type-2 → #`(ptr ,y)
+rule struct-field      : i=expr-ident . “:” .. y=type → #(list i y)
+rule type-struct       : “struct” .. #{? f=@struct-field/#; (. “;”)?} → #`(struct ,@f)
+
+rule expr-2
+    : e=expr-1 | e=expr-not | e=expr-addr | e=expr-deref
+    → e
+rule type-2
+    : y=type-0 | y=type-ptr | y=type-struct
+    → y
+
+rule expr-mul          : e1=expr-2 . “×” . e2=expr-3 → #`(* ,e1 ,e2)
+rule expr-div          : e1=expr-2 . “/” . e2=expr-3 → #`(/ ,e1 ,e2)
+rule expr-mod          : e1=expr-2 . “mod” . e2=expr-3 → #`(mod ,e1 ,e2)
+
+rule type-tuple        : y1=type-2 . “×” . y2=type-3 → #(if (and (consp y2) (eql 'tuple (first y2))) (list* 'tuple y1 (rest y2)) (list 'tuple y1 y2))
+
+rule expr-3            : e=expr-2 | e=expr-mul | e=expr-div | e=expr-mod → #e
+rule type-3            : y=type-2 | y=type-tuple → y
+
+rule type-tuple-list   : y=type-3 → #(if (and (consp y) (eql 'tuple (first y))) (rest y) (list y))
+
+rule expr-add          : e1=expr-3 .. “+” .. e2=expr-4 → #`(+ ,e1 ,e2)
+rule expr-sub          : e1=expr-3 .. “-” .. e2=expr-4 → #`(- ,e1 ,e2)
+
+rule expr-4            : e=expr-3 | e=expr-add | e=expr-sub → #e
+
+rule expr-eql          : e1=expr-4 . “=” . e2=expr-4 → #`(= ,e1 ,e2)
+rule expr-not-eql      : e1=expr-4 . “≠” . e2=expr-4 → #`(/= ,e1 ,e2)
+rule expr-lt           : e1=expr-4 . “<” . e2=expr-4 → #`(< ,e1 ,e2)
+rule expr-lte          : e1=expr-4 . “≤” . e2=expr-4 → #`(<= ,e1 ,e2)
+rule expr-gt           : e1=expr-4 . “>” . e2=expr-4 → #`(> ,e1 ,e2)
+rule expr-gte          : e1=expr-4 . “≥” . e2=expr-4 → #`(>= ,e1 ,e2)
+
+rule expr-5
+    : e=expr-4 | e=expr-eql | e=expr-not-eql
+    | e=expr-lt | e=expr-lte | e=expr-gt | e=expr-gte
+    → #e
+    
+rule expr-and          : e1=expr-5 . “∧” . e2=expr-6 → #`(and ,e1 ,e2)
+rule expr-6            : e=expr-5 | e=expr-and → #e
+
+rule expr-or           : e1=expr-6 . “∨” . e2=expr-7 → #`(or ,e1 ,e2)
+rule expr-7            : e=expr-6 | e=expr-or → #e
+
+rule expr-setf         : e1=expr-2 . “←” . e2=expr-7 → #`(set ,e1 ,e2)
+rule expr-lambda       : a=arglist . “↦” . e2=expr-7 → #`(lambda ,a ,e2)
+rule expr-lambda       : i=expr-ident . “↦” . e2=expr-7 → #`(lambda (,i) ,e2)
+
+rule type-lambda       : y1=type-3 . “→” . y2=type → #`(fn ,y1 ,y2)
+
+extern rule expr
+extern rule expr       : e=expr-7 | e=expr-setf | e=expr-lambda → #e
+extern rule type       : y=type-3 | y=type-lambda → y
+
+rule argument          : i=expr-ident . “:” .. y=type → list(i, y)
+rule arglist           : #(? i=@argument/#, (. “,”)?) → i
+rule type-arglist      : #(? i=@type/#, (. “,”)?) → i
+
+rule stmt-let          : “let” .. i=expr-ident (. “,”)? .. “=” .. e=expr → #`(let ,i ,e)
+rule stmt-return       : “return” .. e=expr → #`(return ,e)
+rule stmt-while        : “while” .. e=expr .. b=block → #`(while ,e ,@b)
+rule stmt-when         : “when” .. e=expr .. b=block → #`(when ,e ,@b)
+rule stmt-expr         : e=expr → #e
+rule stmt              : s=stmt-let | s=stmt-return | s=stmt-while | s=stmt-when | s=stmt-expr → #s
+rule block             : #{? s=@stmt/#; (. “;”)?} → #s
+
+rule trait-method      : i=expr-ident . “:” .. y1=type-tuple-list . “→” . y2=type → #`(,i ,y1 ,y2)
+rule trait-block       : #{? m=@trait-method/#; (. “;”)?} → m
+
+extern rule decl
+    : “builtin” .. “trait” .. name=expr-ident a=type-arglist .. #{? m=@trait-method/#; (. “;”)?}
+    → #`(define-trait-builtin ,name ,a ,@m)
+
+extern rule decl
+    : “ctype” .. name=expr-ident .. “=” .. y=type → #`(define-ctype ,name ,y)
+    
+extern rule decl
+    : “builtin” .. “impl” .. name=expr-ident . “:” .. y=type-3|(y1=type-tuple-list .. “⇒” .. y=type-3)
+    → #`(define-impl-builtin ,name ,y1 ,y)
+
+extern rule decl
+    : “extern” .. “cdefun” .. name=expr-ident a=arglist (.. “→” .. y=type)?
+    → #`(define-cfunction-extern ,name ,a ,(if y y 'void))
+
+extern rule decl
+    : (x=“extern” ..)? “cdefun” .. name=expr-ident a=arglist (.. “→” .. y=type)? .. b=block
+    → #`(define-cfunction (,name ,@(when x `(:extern t))) ,a ,(if y y 'void) ,@b)

@@ -1,0 +1,301 @@
+package fed
+
+
+const* editor-modes = '(:normal :insert :visual :operator)
+type mode = `(member . #.editor-modes)
+type cursor-type = `(member :blinking-block :block
+                            :blinking-underline :underline
+                            :blinking-bar :bar)
+
+var *global-keymap*
+var *default-editor-hooks* = [['editor-init, nil],
+                              ['pre-render, t], ['post-render, nil],
+                              ['pre-draw, t], ['post-draw, nil],
+                              ['pre-read, t], ['post-read, nil],
+                              ['pre-command, t], ['post-command, nil]]
+
+var *default-editor-variables* = nil
+
+var *editor*
+var *editor-stream*
+
+const z-visual-range = 10
+const z-search-highlight = 20
+
+var *no-record* = nil
+var *no-undo* = nil
+var *command-level* = 0
+var *active-cursor* = nil
+var *debug-level* = nil
+var *debug-restarts* = nil
+var *debug-default-restart* = nil
+
+var *current-binding* = nil
+var *previous-binding* = nil
+var *current-key*
+
+var *pending-input* = nil
+
+var *undo-group-record* = nil
+
+var *ast-trace*
+var *open-delimiters*
+var *close-delimiters*
+
+condition editor-condition
+condition editor-cancel(editor-condition)
+condition editor-error(simple-error, editor-condition)
+
+func editor-error(control-string, &rest args):
+    error('editor-error, format-control: control-string, format-arguments: args)
+
+macro bob-error():
+    `(editor-error "Beginning of buffer")
+
+macro eob-error():
+    `(editor-error "End of buffer")
+
+macro bol-error():
+    `(editor-error "Beginning of line")
+
+macro eol-error():
+    `(editor-error "End of line")
+
+macro print-and-ignore-error(&body body):
+    let-gensym name
+    `(block ,name
+       (handler-bind ((error (lambda (e)
+                               (show-condition e *error-output*)
+                               (return-from ,name nil))))
+         (progn ,@body)))
+
+macro recursive-edit(&body body):
+    `(let ((*command-level* 0)
+           (*active-cursor* nil))
+       ,@body)
+
+func toplevel-p():
+    *command-level* <= 1
+
+macro define-editor-command(name, [&key
+                                   cursor = gensym("CURSOR"),
+                                   n{n-p} = gensym("N"),
+                                   register = nil,
+                                   operator{operator-p} = gensym("OPERATOR"),
+                                   mode{mode-p}         = gensym("MODE"),
+                                   modes,
+                                   keys,
+                                   n-nullable-p,
+                                   record,
+                                   prelude,
+                                   prefix-p,
+                                   minibuffer-keys],
+                                  &body body):
+    let record-sym = gensym("RECORD")
+    let args = gensym("ARGS")
+    let form = `(progn ,@body)
+    let record-args = []
+    minibuffer-keys <- {
+        loop for [prompt, key, success-key] in minibuffer-keys
+             collect:
+                 let aux(key, predicate-p) = {
+                     let indicator = nil
+                     let variable = nil
+                     if symbolp(key):
+                         indicator <- intern(symbol-name(key), "KEYWORD")
+                         variable <- key
+                     else:
+                         assert consp(key) and length(key) = 2
+                         indicator <- first(key)
+                         variable <- second(key)
+                     if predicate-p:
+                         [[indicator, variable], nil, gensym(symbol-name(variable))]
+                     else:
+                         [[indicator, variable]]
+                 }
+                 [prompt, aux(key, t), aux(success-key, nil)]
+    }
+    keys <- append(keys, ...mapcar(#'cdr, minibuffer-keys))
+    when n-p:
+        get(name, 'count-prefix) <- t
+    when register:
+        get(name, 'register-prefix) <- t
+    when operator-p:
+        get(name, 'operator-prefix) <- t
+    when prefix-p:
+        get(name, 'prefix) <- t
+    when operator-p:
+        form <- `(flet ((aux () ,form))
+                   (if ,operator
+                       (destructuring-bind (func register) ,operator
+                         (setf ,record-sym (multiple-value-call func ,cursor register (aux))))
+                       (aux)))
+    let parse-key(key) = {
+        if symbolp(key):
+            [intern(symbol-name(key), "KEYWORD"), key]
+        elif symbolp(key[0]):
+            [intern(symbol-name(key[0]), "KEYWORD"), key[0]]
+        else:
+            key[0]
+    }
+    record-args <- [cursor, ['quote, name],
+                    ...(when n-p [n: n]),
+                    ...(when register [register: register]),
+                    ...(when operator-p [operator: operator]),
+                    ...(loop for key in keys append parse-key(key))]
+    `(defun ,name (&rest ,args
+                     &key
+                     ((:cursor ,cursor) (current-cursor))
+                     ,@(when n-p
+                         `(((:n ,n))))
+                     ,@(when register
+                         `(((:register ,register))))
+                     ,@(when operator-p
+                         `(((:operator ,operator))))
+                     ,@keys)
+         (declare (ignorable ,cursor ,args ,@(when n-p `(,n)) ,@(when operator-p `(,operator))))
+         ,@(loop for (prompt key success-key) in minibuffer-keys
+                 collect `(unless ,(third key)
+                            (return-from ,name
+                              (open-minibuffer (lambda (,(cadar key) ,(cadar success-key))
+                                                 (switch-to-window (cursor-window ,cursor))
+                                                 (apply #',name ,@(first key) ,@(first success-key) ,args))
+                                               ,prompt))))
+         ,@(when prelude (list prelude))
+         ,@(when (and n-p (not n-nullable-p))
+             `((setf ,n (or ,n 1))))
+         ,@(when n-p
+             (if n-nullable-p
+                 `((when ,n (setf ,n (max ,n 1))))
+                 `((setf ,n (max ,n 1)))))
+         (let* ((,mode (cursor-mode ,cursor))
+                (,record-sym nil))
+           (declare (ignorable ,record-sym ,@(unless mode-p `(,mode))))
+           ,@(let ((checks (append (when operator-p (list operator))
+                                   (when modes
+                                     (loop for mode-lit in (if operator-p (remove :operator modes) modes)
+                                           collect `(eql ,(the mode mode-lit) ,mode))))))
+               (when checks
+                 `((assert (or ,@checks)))))
+           (let ((*no-record* t)
+                 (*command-level* (1+ *command-level*))
+                 (*active-cursor* ,cursor))
+             ,form)
+           ,(let* ((clauses
+                     (loop with type = nil
+                           for mode in '(:normal :visual :insert :operator)
+                           when (setf type (getf record mode))
+                           collect `(,mode
+                                     ,@(ecase type
+                                         (:record
+                                          `((cursor-record-function ,@record-args)))
+                                         (:start-recording
+                                          `((cursor-start-recording ,cursor)
+                                            (cursor-record-function ,@record-args)))
+                                         (:commit-record
+                                          `((cursor-record-function ,@record-args)
+                                            (cursor-commit-record ,cursor)))
+                                         (:record-simple
+                                          `((cursor-record-simple ,@record-args)))))))
+                   (record-form (when clauses `(case ,mode ,@clauses))))
+              (if operator-p
+                  `(if ,operator
+                       (ecase ,record-sym
+                         ((nil))
+                         ((t) (cursor-record-simple ,@record-args))
+                         (:insert
+                          (cursor-start-recording ,cursor)
+                          (cursor-record-function ,@record-args)))
+                       ,record-form)
+                  record-form))))
+
+macro define-operator([name, apply-name], [p1, p2, &optional type{type-p} = gensym("TYPE")],
+                      [&key cursor = gensym("CURSOR"),
+                            register{register-p} = gensym("REGISTER"),
+                            venterpos,
+                            record],
+                      &body body):
+    let outer-mode = gensym("MODE"), n = gensym("N"), state = gensym("STATE")
+    `(progn
+       (defun ,apply-name (,cursor ,register ,type ,p1 ,p2)
+         (declare (ignore ,@(unless type-p `(,type)) ,@(unless register-p `(,register))))
+         (,@(if venterpos `(let ((,venterpos (cursor-venterpos ,cursor)))) `(progn))
+          (normal-mode :cursor ,cursor)
+          ,@body)
+         ,record)
+     (define-editor-command ,name
+         (:cursor ,cursor :modes (:normal :visual) :mode ,outer-mode
+          :record ,(ecase record ((nil) nil) ((t) '(:visual :commit-record)) (:insert '(:visual :record)))
+          :n-nullable-p t :n ,n ,@(when register-p `(:register ,register)))
+       (ecase ,outer-mode
+         (:normal
+          (let ((,state (input-state)))
+            (setf (input-state-operator-count-prefix ,state) ,n
+                  (input-state-operator-register-prefix ,state) ,(if register-p register nil)
+                  (input-state-operator-prefix ,state) ',apply-name))
+          (setf (cursor-mode cursor) :operator
+                (cursor-venterpos cursor) (cursor-pos cursor)))
+         (:visual
+          (multiple-value-bind (,p1 ,p2) (cursor-visual-bounds ,cursor)
+            (,apply-name ,cursor ,(if register-p register nil) (cursor-vtype ,cursor) ,p1 ,p2))))))
+
+macro define-text-object(name, [&rest keys,
+                                &key cursor = gensym("CURSOR"),
+                                     mode = gensym("MODE"),
+                                     operator = gensym("OPERATOR"),
+                                &allow-other-keys],
+                               &body body):
+    keys <- copy-list(keys); remf(keys, :cursor); remf(keys, :mode); remf(keys, :operator)
+    `(define-editor-command ,name (:cursor ,cursor :modes (:visual) :mode ,mode :operator ,operator ,@keys)
+       (flet ((get-bounds ()
+                ,@body))
+         (if ,operator
+             (get-bounds)
+             (ecase ,mode
+               (:visual
+                (multiple-value-bind (type left right) (get-bounds)
+                  (cursor-expand-region cursor type left right)))))))
+                  
+macro with-cursor-properties([cursor, &key mark-type{mark-type-p}, mode{mode-p}], &body body):
+    let-gensym cursor-sym, mode-sym, mark-type-sym
+    `(let* ((,cursor-sym ,cursor)
+            ,@(when mode-p `((,mode-sym (cursor-mode ,cursor-sym))))
+            ,@(when mark-type-p `((,mark-type-sym (mark-type (cursor-mark ,cursor-sym))))))
+       ,@(when mode-p `((setf (cursor-mode ,cursor-sym) ,mode)))
+       ,@(when mark-type-p `((setf (mark-type (cursor-mark ,cursor-sym)) ,mark-type)))
+       (unwind-protect (progn ,@body)
+         ,@(when mode-p `((setf (cursor-mode ,cursor-sym) ,mode-sym)))
+         ,@(when mark-type-p `((setf (mark-type (cursor-mark ,cursor-sym)) ,mark-type-sym)))))
+
+macro with-undo-group(cursor-and-options, &body body):
+    let [cursor, &rest keys, &key pos, merge] = listify(cursor-and-options)
+    #[ignore(pos, merge)]
+    let-gensym record, vals
+    `(let* ((,record (open-undo-group ,cursor ,@keys))
+            (,vals (list ,record)))
+       (declare (dynamic-extent ,vals))
+       (progv (when ,record '(*undo-group-record*)) (when ,record ,vals)
+         (unwind-protect (progn ,@body)
+           (close-undo-group ,cursor))))
+
+macro save-excursion(cursor, &body body):
+    let-gensym cursor-sym, mark, snapcol
+    `(let* ((,cursor-sym ,cursor)
+            (,snapcol (cursor-snapcol ,cursor-sym)))
+       (with-marks ((,mark (cursor-point ,cursor-sym) (mark-type (cursor-mark ,cursor-sym))))
+         (unwind-protect
+             (progn ,@body)
+           (setf (cursor-point ,cursor-sym) ,mark
+                 (cursor-snapcol ,cursor-sym) ,snapcol))))
+    
+macro define-editor-variable(name, &body [&optional default-value, doc]):
+    #[type(null or string, doc)]
+    `(%define-editor-variable ',name ,default-value ,doc)
+
+#(defsetf cursor-named-mark (cursor name) (mark buffer)
+   `(set-cursor-named-mark ,cursor ,name ,mark ,buffer))
+
+macro with-buffer-package(buffer, &body body):
+    // TODO: should we force a parse before accessing 'package buffer-variable?
+    `(let ((*package* (or (buffer-variable ,buffer 'package) *package*)))
+       ,@body)

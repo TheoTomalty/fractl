@@ -1,0 +1,36 @@
+package fed
+
+
+// Grammar
+
+chars tex-ident [a-zA-Z]
+
+syntax tex-macro-name -> subseq(str, 1):
+    parse "\\" [[tex-ident]]* &([^[tex-ident]]|$) @str
+    
+syntax tex-curly-quote -> list(:curly, subseq(str, 1, length(str) - (if eof 0 1))):
+    parse "{" [^}]* "}"|eof=$ @str
+    
+syntax tex-square-quote -> list(:square, subseq(str, 1, length(str) - (if eof 0 1))):
+    parse "[" [^}]* "]"|eof=$ @str
+    
+syntax tex-macro -> list*(name, quotes):
+    parse name=tex-macro-name (quotes=@tex-curly-quote|quotes=@tex-square-quote)* &([^\[{]|$)
+    
+syntax tex-paragraph:
+    parse ([^\n\\]|macro=@tex-macro|("\n" &([^\n]|$)))+ &(tex-paragraph-separator|$)
+    
+syntax tex-paragraph-separator:
+    parse "\n" [\n]+ &([^\n]|$)
+    
+syntax tex-main -> p:
+    parse tex-paragraph-separator? (p=tex-paragraph/tex-paragraph-separator tex-paragraph-separator?)? $
+    
+    
+// Mode
+
+define-default-grammar "tex" 'tex-main
+
+define-group-attributes tex-macro-name '(:foreground :red)
+
+define-rule-evaluator tex-main comment-prefix "%"

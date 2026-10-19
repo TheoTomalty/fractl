@@ -1,0 +1,372 @@
+package fsh
+
+
+chars psi-cmd-end [&|;\n)]
+chars psi-operator [&|<>;]
+chars psi-token-end [[psi-operator] \t\n)]
+chars psi-special-parameter [@*#?\-$!]
+chars psi-name [a-zA-Z0-9_]
+chars psi-name-start [a-zA-Z_]
+
+progn:
+    macrolet def(name, str):
+       `(ftx:define-syntax (,name :group (,name psi-keyword))
+          (ftx:match ,str)
+          (ftx:peek (ftx:alt (ftx:char-class (psi-token-end)) (ftx:eof))))
+    def psi-bang "!"
+    def psi-lbrace "{"
+    def psi-for "for"
+    def psi-case "case"
+    def psi-if "if"
+    def psi-while "while"
+    def psi-until "until"
+
+progn:
+    macrolet def(name, str):
+       `(ftx:define-syntax (,name :group (,name psi-keyword psi-clist-end) :trace ',name)
+          (ftx:match ,str)
+          (ftx:peek (ftx:alt (ftx:char-class (psi-token-end)) (ftx:eof))))
+    def psi-rbrace "}"
+    def psi-do "do"
+    def psi-done "done"
+    def psi-in "in"
+    def psi-esac "esac"
+    def psi-fi "fi"
+    def psi-then "then"
+    def psi-elif "elif"
+    def psi-else "else"
+    
+syntax psi-escape-newline[psi-token-part, psi-dquote-part, psi-pword-part, psi-pwdq-part, psi-escape-newline] -> nil:
+    parse "\\\n"
+    
+syntax psi-line-comment:
+    parse "#" [^\n]* &([\n]|$)
+    
+syntax psi-ws:
+    parse (([ \t]+ &([^ \t]|$))|psi-line-comment|psi-escape-newline)* &([^ \t\\#]|("\\" [^\n]|$)|$)
+    
+syntax psi-ws-nl:
+    parse (([ \t\n]+ &([^ \t\n]|$))|psi-line-comment|psi-escape-newline)* &([^ \t\n\\#]|("\\" [^\n]|$)|$)
+    
+func dquote(x):
+    if (consp(x) and x[0] == 'dquote):
+        x
+    else:
+        list('dquote, x)
+        
+syntax psi-backquote[psi-token-part, psi-dquote-part, psi-pword-part, psi-pwdq-part]
+        -> {when e1 error("Incomplete backquote escape");
+            when e2 error("Unmatched backquote");
+            list(list('backquote-substitute, unescape(subseq(s, 1, length(s) - 1), substitute: nil)))}:
+    parse "`" ([^\\`]|("\\" .|e1=$))* "`"|e2=$ @s
+    
+syntax psi-escape[psi-token-part, psi-dquote-part, psi-pword-part, psi-pwdq-part]
+        -> (if c list(list('escape, c))
+                 error("Incomplete single escape")):
+    parse "\\" c=[^\n]|$
+    
+syntax psi-squote[psi-token-part, psi-pword-part]
+        -> (if e error("Unmatched single quote") list(list('squote, subseq(s, 1, length(s) - 1)))):
+    parse "'" [^']* "'"|e=$ @s
+    
+syntax psi-dquote[psi-token-part, psi-pword-part, psi-pwdq-part]
+        -> (if e error("Unmatched double quote") mapcar(#'dquote, apply(#'append, p))):
+    parse "\"" p=@psi-dquote-part* "\""|e=$
+    
+syntax psi-parameter-op -> o:
+    parse ":-"|"-"|":="|"="|":?"|"?"|":+"|"+"|("%" &([^%]|$))|"%%"|("#" &([^#]|$))|"##" @o
+    
+syntax psi-parameter-number -> parse-integer(s, radix: 10):
+    parse [0-9]+ &([^0-9]|$) @s
+    
+syntax psi-simple-parameter[psi-token-part, psi-dquote-part, psi-pword-part, psi-pwdq-part]
+        -> list(list('parameter, if c (ignore-errors(char-digit(10, c)) or string(c)) n)):
+    parse "$" c=[[psi-special-parameter]0-9]|n=psi-name
+    
+syntax psi-simple-parameter-error[psi-token-part, psi-dquote-part, psi-pword-part, psi-pwdq-part]
+        -> error("Invalid parameter substitution"):
+    parse "$" &([^[psi-special-parameter][psi-name-start]0-9{]|$)
+
+syntax psi-token-parameter[psi-token-part, psi-pword-part, psi-token-parameter] -> {
+        let name = if c string(c) n;
+        if o:
+            list(list('parameter-op, name, o, apply(#'append, p)));
+        else:
+            list(list('parameter-op, name))
+    }:
+    parse "${" c=[[psi-special-parameter]]|n=psi-name|n=psi-parameter-number (o=psi-parameter-op p=@psi-pword-part*)? "}"
+    
+
+syntax psi-token-parameter-error[psi-token-part, psi-pword-part] -> error("Invalid parameter substitution"):
+    parse ~psi-token-parameter "${" p=@psi-pword-part* "}"|$
+    
+syntax psi-dquote-parameter[psi-dquote-part, psi-pwdq-part, psi-dquote-parameter] -> {
+        let name = if c string(c) n
+        if o:
+            list(list('parameter-op, name, o, mapcar(#'dquote, apply(#'append, p))))
+        else:
+            list(list('parameter-op, name))
+    }:
+    parse "${" c=[[psi-special-parameter]]|n=psi-name|n=psi-parameter-number o=psi-parameter-op p=@psi-pwdq-part* "}"
+    
+syntax psi-dquote-parameter-error[psi-dquote-part, psi-pwdq-part] -> error("Invalid parameter substitution"):
+    parse ~psi-dquote-parameter "${" p=@psi-pwdq-part* "}"?
+                             
+syntax psi-token-list[psi-token-part] -> {
+        when i error("Misplaced operator");
+        when e error("Unmatched paren");
+        list(list*('token-list, p))
+    }:
+    parse "(" psi-ws-nl (p=@psi-token-part|i=@[[psi-operator]] psi-ws-nl)* ")"|e=$
+    
+syntax psi-token-part -> list(s):
+    parse [^[psi-token-end]'"\\`$(]+ &([[psi-token-end]'"\\`$(]|$) @s
+    
+syntax psi-dquote-part -> list(s):
+    parse [^"\\`$]+ &(["\\`$]|$) @s
+    
+syntax psi-pword-part -> list(s):
+    parse [^'"\\`$}]+ &(['"\\`$}]|$) @s
+    
+syntax psi-pwdq-part -> list(s):
+    parse [^"\\`$}]+ &(["\\`$}]|$) @s
+    
+func remove-equals(word):
+    when (stringp(word[0]) and word[0]⟨0⟩ == ‘=’):
+        word <- cons(subseq(word[0], 1), cdr(word))
+    word
+    
+syntax psi-name -> s:
+    parse &[^0-9] [[psi-name]]+ &([^[psi-name]]|$) @s
+syntax psi-word -> apply(#'append, p):
+    parse ~psi-io-number &[^#] p=@psi-token-part+ &([[psi-token-end]]|$)
+syntax psi-assignment-word -> list(:env, n, remove-equals(w)):
+    parse n=psi-name &"=" w=psi-word
+syntax psi-io-number -> parse-integer(s, radix: 10):
+    parse [0-9]+ &[<>] @s
+    
+func simple-command(prefix, command, suffix):
+    let args = when command list(command)
+    loop for p in prefix do:
+        case p[0]:
+            :env -> { push(:env, args); push(cdr(p), args) }
+            :redirect -> { push(:redirect, args); push(cdr(p), args) }
+    loop for s in suffix do:
+        if (consp(s) and s[0] == :redirect):
+            push(:redirect, args)
+            push(cdr(s), args)
+        else:
+            push(s, args)
+    list*('run-command, nreverse(args))
+
+func operator-type(s):
+    if (s === "<"):
+        '(input 0)
+    elif (s === ">"):
+        '(output 1)
+    elif (s === ">|"):
+        '(output-clobber 1)
+    elif (s === ">>"):
+        '(output-append 1)
+    elif (s === "<>"):
+        '(input-output 0)
+    elif (s === "<&"):
+        '(input-copy 0)
+    elif (s === ">&"):
+        '(output-copy 1)
+                      
+syntax psi-cmd-end:
+    parse &(psi-ws [[psi-cmd-end]]|$)
+syntax psi-clist-end-command -> error("Unexpected reserved word"):
+    parse psi-clist-end (psi-ws psi-cmd-suffix)? psi-cmd-end
+syntax psi-sc-1[psi-simple-command] -> simple-command(nil, name, suffix):
+    parse &[^(] name=psi-cmd-name (psi-ws suffix=psi-cmd-suffix)? psi-cmd-end
+syntax psi-sc-2[psi-simple-command] -> simple-command(p, name, suffix):
+    parse p=psi-cmd-prefix (psi-ws name=psi-cmd-word (psi-ws suffix=psi-cmd-suffix)?)? psi-cmd-end
+syntax psi-cmd-name ->  word:
+    parse ~(psi-assignment-word|psi-keyword) word=psi-word
+syntax psi-cmd-word -> w:
+    parse ~psi-assignment-word w=psi-word
+syntax psi-cmd-prefix -> l:
+    parse (l=@psi-io-redirect|l=@psi-assignment-word)/psi-ws
+syntax psi-cmd-suffix -> l:
+    parse (l=@psi-io-redirect|l=@psi-word)/psi-ws
+syntax psi-io-redirect -> list(f[0], f[1], n or f[2], f[3]):
+    parse n=psi-io-number? f=psi-io-file
+syntax psi-io-file -> (if e error("Missing redirect") append(list(:redirect), operator-type(o), list(f))):
+    parse (o="<" &([^&>]|$))|o="<&"|o="<>"|(o=">" &([^&>|]|$))|o=">&"|o=">>"|o=">|" psi-ws f=psi-word|&(e=[[psi-cmd-end]]|e=$)
+    
+syntax psi-brace-group[psi-compound-command] -> (if (b == 'psi-rbrace) c error("Missing closing brace")):
+    parse psi-lbrace psi-ws c=psi-compound-list-maybe psi-ws b=psi-clist-end|&([)]|psi-dsemi-operator|$)
+    
+syntax psi-subshell[psi-compound-command] -> (if e error("Missing closed bracket") list('subshell, c)):
+    parse "(" c=psi-bracketed-compound-list ")"|e=$
+
+syntax psi-for-1 -> list('shell-for, n, list("$@")): // TODO: use real parameter expansion
+    parse psi-for psi-ws n=psi-name psi-ws psi-cmd-end
+    
+syntax psi-for-2 -> list('shell-for, n, w):
+    parse psi-for psi-ws n=psi-name psi-ws-nl psi-in (psi-ws w=@psi-word)* psi-cmd-end
+    
+syntax psi-invalid-for -> error("Malformed for command"):
+    parse ~(psi-for-1|psi-for-2) psi-for (psi-ws psi-cmd-suffix)? psi-cmd-end
+    
+syntax psi-do-group -> (if (b == 'psi-done) c error("Missing closing done")):
+    parse psi-do psi-ws c=psi-compound-list-maybe psi-ws b=psi-clist-end|&([)]|psi-dsemi-operator|$)
+    
+syntax psi-for-command[psi-compound-command] -> append(h, list(d)):
+    parse h=psi-for-1|h=psi-for-2|h=psi-invalid-for (psi-ws psi-sequential-sep psi-ws d=psi-do-group)|(~(psi-ws psi-sequential-sep psi-ws psi-do))
+    
+syntax psi-if-part -> {
+        unless c error("Missing condition");
+        unless then error("Missing then clause");
+        list(c, then, else)
+    }:
+    parse psi-ws c=psi-compound-list-maybe psi-ws (psi-then psi-ws then=psi-compound-list-maybe psi-ws else=psi-else-part)|~psi-then
+    
+syntax psi-else-part -> {
+        when (e and not else) error("Missing else body");
+        (if if-part list*('shell-if, if-part) else)
+    }:
+    parse (psi-elif if-part=psi-if-part)|(e=psi-else psi-ws else=psi-compound-list-maybe psi-ws)|~(psi-elif|psi-else)
+    
+syntax psi-if-command[psi-compound-command] -> (if fi list*('shell-if, if-part) error("Missing fi")):
+    parse psi-if if-part=psi-if-part fi=psi-fi|~psi-fi
+    
+syntax psi-while-command[psi-compound-command] -> {
+        unless c error("Missing condition");
+        unless d error("Missing do group");
+        list('shell-while, c, d)
+    }:
+    parse psi-while psi-ws c=psi-compound-list-maybe (psi-ws d=psi-do-group)|~psi-do
+    
+syntax psi-until-command[psi-compound-command] -> {
+        unless c error("Missing condition");
+        unless d error("Missing do group");
+        list('shell-until, c, d)
+    }:
+    parse psi-until psi-ws c=psi-compound-list-maybe (psi-ws d=psi-do-group)|~psi-do
+    
+
+syntax psi-pattern -> list*(w1, ws):
+    parse ~psi-esac w1=psi-word (psi-ws "|" psi-ws ws=@psi-word/(psi-ws "|" psi-ws))?
+    
+syntax psi-case-item -> list(p, c):
+    parse ("(" psi-ws)? p=psi-pattern psi-ws ")" (psi-ws c=psi-compound-list)?
+    
+syntax psi-case-command[psi-case-command, psi-compound-command] -> list*('shell-case, w, c):
+    parse psi-case psi-ws w=psi-word psi-ws-nl psi-in psi-ws-nl (c=@psi-case-item/(psi-ws ";;" psi-ws) (psi-ws ";;")? psi-ws)? psi-esac
+                                   
+syntax psi-invalid-case[psi-compound-command] -> error("Malformed case command"):
+    parse ~psi-case-command psi-case psi-ws
+          ((~psi-esac psi-and-or|psi-semi-operator|psi-background-operator|psi-newline-list|psi-dsemi-operator|[)]) psi-ws)*
+          psi-esac|$
+    
+func wrap-redirect(c, r):
+    loop for word in r do:
+        assert(word[0] == :redirect, nil, "Extra words after compound command")
+    (if r `(with-shell-opts ',r ,c) c)
+
+syntax psi-fname -> n:
+    parse ~psi-keyword n=psi-name &([[psi-token-end]]|$)
+    
+syntax psi-function-definition -> list('shell-defun, n, wrap-redirect(c, r)):
+    parse n=psi-fname psi-ws "(" psi-ws ")" psi-ws-nl c=psi-compound-command (psi-ws r=psi-cmd-suffix)?
+                             
+syntax psi-command -> wrap-redirect(c, r):
+    parse c=psi-simple-command|(c=psi-compound-command (psi-ws r=psi-cmd-suffix)?)|c=psi-function-definition psi-cmd-end
+    
+syntax psi-newline-list -> "\n":
+    parse [\n]/psi-ws &(psi-ws [^\n]|$)
+    
+syntax psi-sequential-sep:
+    parse psi-semi-operator|psi-newline-list
+    
+syntax psi-eat-newlines:
+    parse psi-ws psi-newline-list? &([^\n]|$);
+syntax psi-semi-operator -> ";":
+    parse ";" &([^;]|$) psi-eat-newlines
+syntax psi-dsemi-operator -> ";;":
+    parse ";;"
+syntax psi-pipe-operator -> "|":
+    parse "|" &([^|]|$) psi-eat-newlines
+syntax psi-or-operator -> "||":
+    parse "||" psi-eat-newlines
+syntax psi-background-operator -> "&":
+    parse "&" &([^&]|$) psi-eat-newlines
+syntax psi-and-operator -> "&&":
+    parse "&&" psi-eat-newlines 
+    
+func pipe-command(cmd):
+    assert(not stringp(cmd), nil, "Misplaced pipe operator")
+    assert(not (listp(cmd) and cmd[0] == 'shell-not), nil, "Misplaced bang operator")
+    cmd
+    
+func %apply-pipe(list):
+    case length(list):
+        0 -> error("Missing pipe command")
+        1 -> list(pipe-command(list[0]))
+        assert(list[1] === "|", nil, "Misplaced pipe operator")
+        list*(pipe-command(list[0]), %apply-pipe(cddr(list)))
+
+func apply-pipe(list):
+    let ret = %apply-pipe(list)
+    case length(ret):
+        0 -> nil
+        1 -> ret[0]
+        list*('shell-pipe, ret)
+        
+syntax psi-pipeline-not -> (if p list('shell-not, p) error("Missing pipeline")):
+    parse psi-bang (psi-ws p=psi-pipeline)? &(psi-ws [&;\n)]|psi-or-operator|$)
+syntax psi-pipeline -> (if (listp(c[0]) and c[0][0] == 'shell-not) c[0] apply-pipe(c)):
+    parse (c=@psi-pipeline-not|c=@psi-command|c=@psi-clist-end-command|c=@psi-pipe-operator)/psi-ws &(psi-ws [&;\n)]|psi-or-operator|$)
+    
+func and-or-command(cmd):
+    assert(not stringp(cmd), nil, "Misplaced and/or operator")
+    cmd
+    
+func apply-and-or(list):
+    // TODO: implement precedence (|| higher than &&)
+    case length(list):
+        0 -> error("Missing and/or command")
+        1 -> and-or-command(list[0])
+        list(if (list[1] === "&&") 'shell-and (if (list[1] === "||") 'shell-or error("Misplaced and/or operator")),
+             and-or-command(list[0]), apply-and-or(cddr(list)))
+             
+syntax psi-and-or -> apply-and-or(p):
+    parse (p=@psi-pipeline|p=@psi-and-operator|p=@psi-or-operator)/psi-ws &(psi-ws [;\n)]|psi-background-operator|$)
+    
+func apply-background(command):
+    if member(command[0], '(shell-pipe run-command)):
+        list*(command[0], append(cdr(command), list(:background, t)));
+    else error("Unreachable");
+    
+func apply-compound-list(list):
+    let ret = nil
+    when (list[0] === "\n") pop(list)
+    loop while list do:
+        assert(not stringp(list[0]), nil, "Missing and/or")
+        push(if (null(cdr(list)) or list[1] === ";" or list[1] === "\n") list[0] (if (list[1] === "&") apply-background(list[0]) error("Unreachable")),
+             ret)
+        list <- cddr(list);
+    case length(ret):
+        0 -> nil
+        1 -> ret[0]
+        list*('shell-progn, nreverse(ret))
+        
+syntax psi-compound-list -> apply-compound-list(a):
+    parse (~psi-clist-end a=@psi-and-or|a=@psi-semi-operator|a=@psi-background-operator|a=@psi-newline-list)/psi-ws
+          &(psi-ws [)]|psi-dsemi-operator|psi-clist-end|$)
+
+syntax psi-compound-list-maybe -> apply-compound-list(a):
+    parse ((~psi-clist-end a=@psi-and-or|a=@psi-semi-operator|a=@psi-background-operator|a=@psi-newline-list)/psi-ws)?
+          &(psi-ws [)]|psi-dsemi-operator|psi-clist-end|$)
+                             
+syntax psi-bracketed-compound-list -> (if e error("Unexpected dsemi operator") apply-compound-list(a)):
+    parse psi-ws
+          ((a=@psi-and-or|a=@psi-semi-operator|a=@psi-background-operator|a=@psi-newline-list|(psi-dsemi-operator !e))/psi-ws psi-ws)?
+          &([)]|$)
+                                
+syntax psi-main -> (if e error("Malformed psi toplevel") apply-compound-list(a)):
+    parse psi-ws (psi-newline-list psi-ws)? &([^\n]|$)
+          ((a=@psi-and-or|a=@psi-semi-operator|a=@psi-background-operator|a=@psi-newline-list|(psi-dsemi-operator|")" !e))/psi-ws psi-ws)? $

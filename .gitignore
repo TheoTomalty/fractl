@@ -1,0 +1,6 @@
+*.fasl
+*.o
+f0/forth
+bin/fed
+bin/fed-stable
+lib/*.so

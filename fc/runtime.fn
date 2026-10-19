@@ -1,0 +1,86 @@
+import chi-symbols
+import chi-grammar
+import libc
+import types
+import comp
+import assemble
+
+// chi-std
+
+builtin trait eq(A) {
+    «=»:  A × A → bool
+    «/=»: A × A → bool
+}
+
+builtin trait num(A) {
+    «+»: A × A → A
+    «-»: A × A → A
+    «*»: A × A → A
+    «/»: A × A → A
+    mod: A × A → A
+}
+
+builtin trait indexable(A, B) {
+    index: A × i32 → B
+}
+
+builtin trait coercible(A, B) {
+    coerce: A → B
+}
+
+builtin impl num-i8: num(i8)
+builtin impl num-u8: num(u8)
+builtin impl num-i16: num(i16)
+builtin impl num-u16: num(u16)
+builtin impl num-i32: num(i32)
+builtin impl num-u32: num(u32)
+builtin impl num-i64: num(i64)
+builtin impl num-u64: num(u64)
+
+builtin impl eq-num: num(A) ⇒ eq(A)
+builtin impl coercible-num: num(A) × num(B) ⇒ coercible(A, B)
+
+builtin impl indexable-ptr: indexable(*A, A)
+builtin impl indexable-array: indexable(array(A, B), A)
+
+extern cdefun malloc(n: i32) → *A
+
+// runtime
+
+ctype hash-table = struct {
+    size: u32
+    type: u32
+}
+
+cdefun ht-size(ht: hash-table) → u32 {
+    return *&ht.size
+}
+
+cdefun gc-malloc(n: i32) → *A {
+    return malloc(n)
+}
+
+extern cdefun show-i32(x: i32) → *i8 {
+    let y = x
+    when x = 0 {
+        let ret = malloc(2)
+        ret_0 ← ‘0’
+        ret_1 ← ‘\0’
+        return ret
+    }
+    let length = 0
+    while y ≠ 0 {
+        length ← length + 1
+        y ← y / 10
+    }
+    let s = malloc(length + 1)
+    y ← x
+    s_length ← ‘\0’
+    let i = length - 1
+    while y ≠ 0 {
+        s_i ← ‘0’ + coerce(y mod 10)
+        y ← y / 10
+        i ← i - 1
+    }
+    return s
+}
