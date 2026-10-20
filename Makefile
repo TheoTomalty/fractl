@@ -1,17 +1,23 @@
 .PHONY: all run bin/fed bin/fed-stable
-all: lib/termio.so lib/shell.so bin/fed
+all: bin/fed
 
-run: bin/fed lib/*.so
+run: bin/fed
 	./bin/fed
 
-bin/fed:
+bin/fed: lib/termio.so lib/shell.so
 	sbcl --noinform --non-interactive --eval '(load "load.lisp")' --eval '(sb-ext:save-lisp-and-die "$@" :toplevel '\''fed::main :executable t)'
 
-bin/fed-stable:
-	sbcl --noinform --quit --eval '(load "load.lisp")' --eval '(sb-ext:save-lisp-and-die "$@" :toplevel '\''fed::main :executable t)'
+bin/fed-stable: lib/termio.so lib/shell.so
+	sbcl --noinform --non-interactive --eval '(load "load.lisp")' --eval '(sb-ext:save-lisp-and-die "$@" :toplevel '\''fed::main :executable t)'
 
 lib/termio.so: fed/termio.c
-	gcc -o $@ -shared -fPIC $^
+	cc -o $@ -shared -fPIC $^
 
 lib/shell.so: fsh/shell.c
-	gcc -o $@ -shared -fPIC $^
+	cc -o $@ -shared -fPIC $^
+
+f0/forth.o: f0/forth.s
+	as -o $@ $^
+
+f0/forth: f0/forth.o
+	ld -o $@ $^
