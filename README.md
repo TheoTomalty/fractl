@@ -54,6 +54,12 @@ make bin/fed
 ./bin/fed
 ```
 
+This drops you into the shell (FSH).  Then, you can edit a file by typing the
+command `e <filename>`.  Use `C-z` to switch between the editor buffer and the
+shell, and `C-^` to switch to the previous text buffer (or switch to the Lisp
+REPL if the shell is currently active).  See fed/bindings.lisp for the full
+list of key bindings.
+
 # Fractl Text (ftx)
 
 The core part of fractl.  This subproject contains the grammar system for
